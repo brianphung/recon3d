@@ -18,6 +18,7 @@ from PIL import Image
 from scipy import ndimage
 import skimage
 import skimage.io as skio
+import cv2
 
 # Local imports
 from recon3d.types import *
@@ -41,7 +42,7 @@ from recon3d.types import *
 #     np.save(save_path, data)
 
 
-def binary_with_pores_to_semantic(input_path: Path, output_path: Path) -> dict:
+def binary_with_pores_to_semantic(input_path: Path, output_path: Path, find_surface_defects: bool = False, rot_angle: float = 15.0) -> dict:
     """
     Convert a folder of segmented/binarized TIFF images to a Semantic Image Stack.
 
@@ -70,6 +71,8 @@ def binary_with_pores_to_semantic(input_path: Path, output_path: Path) -> dict:
         *---*---*---*---*
         | 1 | 1 | 1 | 0 |
         *---*---*---*---*
+    find_surface_defects : bool
+        Include surface defects in the semantic image stack.
 
     Returns
     -------
@@ -82,6 +85,8 @@ def binary_with_pores_to_semantic(input_path: Path, output_path: Path) -> dict:
                     value: 1
                 pore:
                     value: 2
+                surface defect (if enabled):
+                    value: 3
 
     Raises
     ------
@@ -92,7 +97,7 @@ def binary_with_pores_to_semantic(input_path: Path, output_path: Path) -> dict:
     --------
     >>> input_path = Path("path/to/binary_images")
     >>> output_path = Path("path/to/save/semantic_images")
-    >>> binary_with_pores_to_semantic(input_path, output_path)
+    >>> binary_with_pores_to_semantic(input_path, output_path, surface_defects=False)
     {'class_labels': {'air': {'value': 0}, 'metal': {'value': 1}, 'pore': {'value': 2}}}
 
     """
@@ -121,12 +126,21 @@ def binary_with_pores_to_semantic(input_path: Path, output_path: Path) -> dict:
         sample = ndimage.binary_fill_holes(bw_data.astype(np.bool_))
         np.place(output_data, sample, 1)
 
+        if find_surface_defects:
+            # isolate surface defects, assign as 'surface defect', 3
+            print("Detecting Surface Defects...")
+            surface_defects = surface_scan(output_data, rot_angle)
+            surface_defects[output_data == 1] = False
+            np.place(output_data, surface_defects, 3)
+
         # isolate holes within 'metal', assign as 'pore', 2
         print("\tIsolating Voids...")
         voids = np.logical_xor(sample, bw_data)
         np.place(output_data, voids, 2)
 
         # thus, everything else is 'air', 0
+
+
 
     class_labels = {
         "class_labels": {
@@ -136,6 +150,11 @@ def binary_with_pores_to_semantic(input_path: Path, output_path: Path) -> dict:
         }
     }
 
+    if find_surface_defects:
+        class_labels['class_labels']['surface defect'] = {"value": 3}
+
+
+
     ndarray_to_img(
         data=output_data,
         slice_axis=CartesianAxis3D.Z,
@@ -144,6 +163,85 @@ def binary_with_pores_to_semantic(input_path: Path, output_path: Path) -> dict:
     )
 
     return class_labels
+
+def surface_scan(sample: np.ndarray, rotation_angle: float):
+    """
+    
+    Parameters
+    ----------
+    sample : np.ndarray
+        The input array where the sample has been identified (with value = 1).
+    rotation_angle : float
+        The path to the YAML input file containing configuration settings.
+
+    Returns
+    -------
+    data : np.ndarray
+        The semantic labels.
+
+    Examples
+    --------
+    >>> 
+
+    """
+    rotation_angles = np.arange(0, 180, rotation_angle, dtype=int)
+
+    # Because we are rotating the image, we need to expand the image to accommodate the rotation.
+    Z_ref, Y_ref, X_ref = sample.shape
+    diag = np.sqrt(Y_ref**2 + X_ref**2)
+    Y_pad = int(np.ceil((diag-Y_ref)/2.))
+    X_pad = int(np.ceil((diag-X_ref)/2.))
+    X_pad_ref = X_ref + 2*X_pad
+    Y_pad_ref = Y_ref + 2*Y_pad
+
+    # Cast sample into uint8 (required by OpenCV)
+    padded_sample = np.zeros(shape=(Z_ref,Y_pad_ref, X_pad_ref), dtype=np.uint8)
+    padded_sample[:, Y_pad:Y_ref+Y_pad, X_pad:X_ref+X_pad] = sample*255
+
+    # Set the area_threshold: contour areas greater than this are not considered surface defects
+    # Effectively removes the bulk metal as a surface defect
+    # Currently hard coded to 5%
+    area_threshold = int(X_ref*Y_ref*0.0001)
+
+    for angle in rotation_angles:
+        # Rotate the sample by each rotation angle
+        if np.isclose(angle, 0.0):
+            rot_image = padded_sample.copy()
+        else:
+            rot_image = ndimage.rotate(padded_sample, angle, axes=(1, 2), reshape=False)
+
+        # March through the y direction of the sample, and draw contours of the sample in the XZ plane
+        projections = np.zeros(shape=(Z_ref, Y_pad_ref, X_pad_ref), dtype=np.int8)
+        for i in range(Y_pad_ref):
+            # Get the slice of the rotated image
+            slice_image = rot_image[:, i, :]
+            if np.sum(slice_image) == 0:
+                projections[:, i, :] = slice_image
+                continue
+            # Find the contours of the sample
+            contours, _ = cv2.findContours(slice_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            # Filter out contours that are greater than the area threshold
+            contours = [ C for C in contours if cv2.contourArea(C) <= area_threshold]
+            # Fills the area (last -1 argument) of all contours (first -1 argument) with the value 127
+            
+            cv2.drawContours(slice_image, contours, -1, 127, -1)
+            projections[:, i, :] = slice_image
+    
+        
+        # Undo the rotation, and copy detected surface defects to the original image 
+        if np.isclose(angle, 0.0):
+            lab_images = projections
+        else:
+            lab_images = ndimage.rotate(projections, angle, axes=(1, 2), reshape=False)
+
+        # March through the Z direction 
+        for j in range(Z_ref):
+            lab_image = lab_images[j, :, :]
+            padded_sample[j, :, :][lab_image == 127] = 3
+
+
+    # Return the sample minus the padding, cast into int8
+    return padded_sample[:, Y_pad:Y_ref+Y_pad, X_pad:X_ref+X_pad] == 3
 
 
 def validate_yml(yml_input_file: Path, cli_entry_point: str) -> tuple[Path, Path]:
@@ -311,8 +409,14 @@ def binary_to_semantic(yml_input_file: Path) -> bool:
         yml_input_file, "binary_to_semantic"
     )
 
+    detect_surface_defects = False
+    if 'surface_defects' in params:
+        detect_surface_defects = params['surface_defects']
+
+
     class_labels = binary_with_pores_to_semantic(
-        input_path=input_path, output_path=output_path
+        input_path=input_path, output_path=output_path,
+        find_surface_defects=detect_surface_defects
     )
 
     print(f"class labels for semantic stack:\n{class_labels}")
