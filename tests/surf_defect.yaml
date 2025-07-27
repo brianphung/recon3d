@@ -1,0 +1,7 @@
+cli_entry_points:
+- binary_to_semantic
+
+image_dir: data/cylinder_rough # (str) path to Images 
+out_dir: data/output/binary_to_semantic # (str) path for the processed files
+
+surface_defects: true

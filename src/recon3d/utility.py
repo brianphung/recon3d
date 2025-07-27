@@ -16,12 +16,15 @@ import numpy as np
 import yaml
 from PIL import Image
 from scipy import ndimage
-import skimage
-import skimage.io as skio
+from skimage.filters import median
+from skimage.morphology import disk
+import imutils
 import cv2
 
 # Local imports
 from recon3d.types import *
+
+import matplotlib.pyplot as plt
 
 # import recon3d.feature_analysis as fa
 # from recon3d.feature_analysis import SemanticImageStack
@@ -129,14 +132,14 @@ def binary_with_pores_to_semantic(input_path: Path, output_path: Path, find_surf
         if find_surface_defects:
             # isolate surface defects, assign as 'surface defect', 3
             print("Detecting Surface Defects...")
-            surface_defects = surface_scan(output_data, rot_angle)
+            surface_defects = surface_scan(bw_data, rot_angle)
             surface_defects[output_data == 1] = False
             np.place(output_data, surface_defects, 3)
 
-        # isolate holes within 'metal', assign as 'pore', 2
-        print("\tIsolating Voids...")
-        voids = np.logical_xor(sample, bw_data)
-        np.place(output_data, voids, 2)
+        # # isolate holes within 'metal', assign as 'pore', 2
+        # print("\tIsolating Voids...")
+        # voids = np.logical_xor(sample, bw_data)
+        # np.place(output_data, voids, 2)
 
         # thus, everything else is 'air', 0
 
@@ -166,78 +169,149 @@ def binary_with_pores_to_semantic(input_path: Path, output_path: Path, find_surf
 
 def surface_scan(sample: np.ndarray, rotation_angle: float):
     """
-    
-    Parameters
-    ----------
-    sample : np.ndarray
-        The input array where the sample has been identified (with value = 1).
-    rotation_angle : float
-        The path to the YAML input file containing configuration settings.
-
-    Returns
-    -------
-    data : np.ndarray
-        The semantic labels.
-
-    Examples
-    --------
-    >>> 
-
+    Detect surface defects by rotating the binary sample, finding small
+    background contours, and labeling them.
     """
-    rotation_angles = np.arange(0, 180, rotation_angle, dtype=int)
 
-    # Because we are rotating the image, we need to expand the image to accommodate the rotation.
-    Z_ref, Y_ref, X_ref = sample.shape
-    diag = np.sqrt(Y_ref**2 + X_ref**2)
-    Y_pad = int(np.ceil((diag-Y_ref)/2.))
-    X_pad = int(np.ceil((diag-X_ref)/2.))
-    X_pad_ref = X_ref + 2*X_pad
-    Y_pad_ref = Y_ref + 2*Y_pad
 
-    # Cast sample into uint8 (required by OpenCV)
-    padded_sample = np.zeros(shape=(Z_ref,Y_pad_ref, X_pad_ref), dtype=np.uint8)
-    padded_sample[:, Y_pad:Y_ref+Y_pad, X_pad:X_ref+X_pad] = sample*255
+    # Create list of rotation angles
+    angles = np.arange(0, 180, rotation_angle, dtype=int)
+    # Transpose sample to (Y, X, Z) so we can slice along Y
+    stack = np.transpose(sample.copy(), (1, 2, 0))
 
-    # Set the area_threshold: contour areas greater than this are not considered surface defects
-    # Effectively removes the bulk metal as a surface defect
-    # Currently hard coded to 5%
-    area_threshold = int(X_ref*Y_ref*0.0001)
-
-    for angle in rotation_angles:
-        # Rotate the sample by each rotation angle
-        if np.isclose(angle, 0.0):
-            rot_image = padded_sample.copy()
+    for angle in angles:
+        # 1) Rotate each XY slice by “angle”
+        if angle != 0:
+            rotated_layers = [
+                imutils.rotate(stack[:, :, k], angle=angle)
+                for k in range(stack.shape[2])
+            ]
+            rotated = np.dstack(rotated_layers)
         else:
-            rot_image = ndimage.rotate(padded_sample, angle, axes=(1, 2), reshape=False)
+            rotated = stack
 
-        # March through the y direction of the sample, and draw contours of the sample in the XZ plane
-        projections = np.zeros(shape=(Z_ref, Y_pad_ref, X_pad_ref), dtype=np.int8)
-        for i in range(Y_pad_ref):
-            # Get the slice of the rotated image
-            slice_image = rot_image[:, i, :]
-            if np.sum(slice_image) == 0:
-                projections[:, i, :] = slice_image
+        # 2) Project along Y → build XZ slices, detect small contours
+        projections = []
+        for i in range(rotated.shape[1]):
+            slice_img = rotated[:, i, :].copy()
+            if slice_img.sum() == 0:
+                projections.append(slice_img)
                 continue
-            # Find the contours of the sample
-            contours, _ = cv2.findContours(slice_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-            # Filter out contours that are greater than the area threshold
-            contours = [ C for C in contours if cv2.contourArea(C) <= area_threshold]
-            # Fills the area (last -1 argument) of all contours (first -1 argument) with the value 127
+
+            # invert: metal=255→0, background=0→255
+            inv = np.zeros_like(slice_img)
+            inv[slice_img == 255] = 0
+            inv[slice_img == 0]   = 255
+
+            # find all contours and keep only small ones (<5% of slice area)
+            contours, _ = cv2.findContours(inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            area_thresh = int(inv.shape[0] * inv.shape[1] * 0.05)
+            small = [c for c in contours if cv2.contourArea(c) <= area_thresh]
+
+            # draw them onto the original slice as label=100
+            cv2.drawContours(slice_img, small, -1, 100, -1)
+            projections.append(slice_img)
+
+        proj_stack = np.dstack(projections)
+
+        # 3) Map label=100 voxels back into “stack”
+        for j in range(proj_stack.shape[1]):
+            lab_slice = proj_stack[:, j, :]
+            if angle != 0:
+                lab_slice = imutils.rotate(lab_slice, angle=-angle)
+            mask = (lab_slice == 100)
+            stack[:, :, j][mask] = 100
+
+    # 4) Post-process with median filter to clean up isolated pixels
+    cleaned = []
+    for m in range(stack.shape[2]):
+        img = stack[:, :, m].copy()
+        med = median(img, disk(5))
+        img[(img == 0) & (med != 0)] = 100
+        cleaned.append(img)
+    cleaned = np.dstack(cleaned)
+
+    # 5) Return a boolean mask (True where defects labeled 100)
+    return np.transpose(cleaned, (2, 0, 1)) == 100
+
+    # rotation_angles = np.arange(0, 180, rotation_angle, dtype=int)
+
+    # # Because we are rotating the image, we need to expand the image to accommodate the rotation.
+    # Z_ref, Y_ref, X_ref = sample.shape
+    # diag = np.sqrt(Y_ref**2 + X_ref**2)
+    # Y_pad = int(np.ceil((diag-Y_ref)/2.))
+    # X_pad = int(np.ceil((diag-X_ref)/2.))
+    # X_pad_ref = X_ref + 2*X_pad
+    # Y_pad_ref = Y_ref + 2*Y_pad
+
+    # # Cast sample into uint8 (required by OpenCV)
+    # padded_sample = np.zeros(shape=(Z_ref,Y_pad_ref, X_pad_ref), dtype=np.uint8)
+    # padded_sample[:, Y_pad:Y_ref+Y_pad, X_pad:X_ref+X_pad] = sample
+    # # Set the area_threshold: contour areas greater than this are not considered surface defects
+    # # Effectively removes the bulk metal as a surface defect
+    # # Currently hard coded to 5%
+    # area_threshold = int(X_ref*Y_ref*0.05)
+
+    # for angle in rotation_angles:
+    #     # Rotate the sample by each rotation angle
+    #     #print('Padded Samples Shapes', padded_sample.shape)
+    #     #exit(1)
+    #     if np.isclose(angle, 0.0):
+    #         rot_image = padded_sample.copy()
+    #     else:
+    #         rot_image = ndimage.rotate(padded_sample, angle, axes=(0,1), reshape=False, mode='constant', cval=0, order=0)
+    #     # plt.figure()
+    #     # print('Plot at ', Y_pad_ref//2)
+    #     # plt.imshow(rot_image[:, Y_pad_ref//2, :], cmap='gray')
+    #     # plt.title(f"rotated image angle {angle}")
+    #     # plt.show()
+    #     # March through the y direction of the sample, and draw contours of the sample in the XZ plane
+    #     projections = np.zeros(shape=(Z_ref, Y_pad_ref, X_pad_ref), dtype=np.uint8)
+    #     for i in range(X_pad_ref):
+    #         # Get the slice of the rotated image
+    #         slice_image = np.copy(rot_image[:, :, i])
+
+    #         if np.sum(slice_image) == 0:
+    #             projections[:, :, i] = slice_image
+    #             continue
+
+
+    #         # Invert the slice to detect background defects as contours
+    #         inv_slice = invertImage(slice_image)
+
+    #         # print(np.sum(slice_image))
+    #         contours, _ = cv2.findContours(inv_slice, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    #         #print(slice_image.shape, invertImage(slice_image).shape)
+    #         # Filter out contours that are greater than the area threshold
+    #         contours = [C for C in contours if cv2.contourArea(C) <= area_threshold]
+    #         # Draw detected contours onto the original slice
+    #         #temp = np.zeros(slice_image.shape, dtype='uint8')
+    #         cv2.drawContours(slice_image, contours, -1, 100, -1)
+    #         # plt.figure()
+    #         # print('Plot at ', i)
+    #         # plt.imshow(slice_image)
+    #         # plt.title(f"rotated stack angle {angle}")
+    #         # plt.show()
+    #         print(np.unique(slice_image))
+    #         print(np.unique(projections[:,:,i]), np.unique(projections))
             
-            cv2.drawContours(slice_image, contours, -1, 127, -1)
-            projections[:, i, :] = slice_image
+    #         projections[:, :, i] = slice_image
+    #         print(np.unique(projections[:,:,i]), np.unique(projections))
     
         
-        # Undo the rotation, and copy detected surface defects to the original image 
-        if np.isclose(angle, 0.0):
-            lab_images = projections
-        else:
-            lab_images = ndimage.rotate(projections, angle, axes=(1, 2), reshape=False)
+    #     # Undo the rotation, and copy detected surface defects to the original image 
+    #     #print("projections size", projections.shape)
+    #     #exit(1)
+    #     if np.isclose(angle, 0.0):
+    #         lab_images = projections
+    #     else:
+    #         lab_images = ndimage.rotate(projections, -angle, axes=(1,2), reshape=False, mode='constant', cval=0, order=0)
 
-        # March through the Z direction 
-        for j in range(Z_ref):
-            lab_image = lab_images[j, :, :]
-            padded_sample[j, :, :][lab_image == 127] = 3
+    #     # March through the X direction 
+    #     for j in range(Z_ref):
+    #         lab_image = lab_images[j, :, :]
+    #         padded_sample[j, :, :][lab_image == 100] = 3
+    #     print('Finished rotation, ', angle )
 
 
     # Return the sample minus the padding, cast into int8
