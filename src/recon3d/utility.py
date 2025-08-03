@@ -136,10 +136,10 @@ def binary_with_pores_to_semantic(input_path: Path, output_path: Path, find_surf
             surface_defects[output_data == 1] = False
             np.place(output_data, surface_defects, 3)
 
-        # # isolate holes within 'metal', assign as 'pore', 2
-        # print("\tIsolating Voids...")
-        # voids = np.logical_xor(sample, bw_data)
-        # np.place(output_data, voids, 2)
+        # isolate holes within 'metal', assign as 'pore', 2
+        print("\tIsolating Voids...")
+        voids = np.logical_xor(sample, bw_data)
+        np.place(output_data, voids, 2)
 
         # thus, everything else is 'air', 0
 

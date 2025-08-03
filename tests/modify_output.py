@@ -17,8 +17,8 @@ def binarize_tif(input_path, output_path):
     tifffile.imwrite(output_path, binary)
 
 # Define input and output directories
-input_dir = '/Users/brian/Work/projects/recon3d/tests/data/output/binary_to_semantic'    # Replace with your actual input folder
-output_dir = '/Users/brian/Work/projects/recon3d/tests/data/output/viz_images'  # Replace with your actual output folder
+input_dir = '/Users/bphung/Work/software/recon3d/tests/data/output/binary_to_semantic'    # Replace with your actual input folder
+output_dir = '/Users/bphung/Work/software/recon3d/tests/data/output/viz_images'  # Replace with your actual output folder
 
 os.makedirs(output_dir, exist_ok=True)
 

@@ -650,6 +650,8 @@ class InstanceImageStack(NamedTuple):
         The number of labels.
     min_feature_size : int
         The minimum feature size.
+    voxel_graph : npt.NDArray[np.int_] or None
+        If the feature class label is a surface defect, store the cc3d graph
     """
 
     name: str
@@ -657,6 +659,7 @@ class InstanceImageStack(NamedTuple):
     data: npt.NDArray[np.int_]
     nlabels: int
     min_feature_size: int
+    voxel_graph: npt.NDArray[np.int_]
 
 
 class InstanceIndices(NamedTuple):
@@ -695,6 +698,7 @@ class SemanticImageStack(NamedTuple):
     name: str
     metadata: MetaData
     data: npt.NDArray[np.int_]
+
 
 
 class VoidDescriptorEllipsoidAngles(NamedTuple):

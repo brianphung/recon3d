@@ -637,6 +637,7 @@ def minimum_size_filter(
         data=remapped_instance_ids,
         nlabels=nlabels,
         min_feature_size=initial_stack.min_feature_size,
+        voxel_graph=initial_stack.voxel_graph
     )
 
     filtered_indices = instance_indices(instance_stack=filtered_stack)
@@ -947,6 +948,12 @@ def semantic_to_instance(
         The value in the semantic stack representing the class to isolate.
     min_feature_size : int
         The minimum feature size to retain in the instance image stack.
+    surface_defect : bool, optional
+        If True, the function will handle surface defects in the instance image stack.
+    round_bar_specimen : bool, optional
+        If True, the function will handle round bar specimens in the instance image stack.
+    specimen_centroid : npt.NDArray[np.float_], optional
+        The centroid of the specimen in the image stack, used for surface defect handling.
 
     Returns
     -------
@@ -997,12 +1004,13 @@ def semantic_to_instance(
     print(
         f"\t\twith cc3d package, found {cc3d_nlabels} connected components in '{instance_name}'"
     )
+
     return InstanceImageStack(
         name=instance_name,
         data=cc3d_instance_stack,
         metadata=semantic_stack.metadata,
         nlabels=cc3d_nlabels,
-        min_feature_size=min_feature_size,
+        min_feature_size=min_feature_size
     )
 
 
@@ -1059,6 +1067,17 @@ def instance_analysis_included(settings: dict, key: str) -> bool:
     except KeyError:
         return False
 
+def instance_properties_surface_defect(
+    semantic_stack: SemanticImageStack,
+    air_value: int,
+    defect_value: int,
+    instance_stack: InstanceImageStack,
+    inst_indices: InstanceIndices,
+) -> InstanceImageStack:
+    # First, 
+
+    
+    return None
 
 def instance_properties(
     instance_stack: InstanceImageStack,
@@ -1241,6 +1260,8 @@ def process(yml_file: Path) -> bool:
 
         print(f"Analyzing '{instance_name}' semantic label")
 
+        surface_defect = db["class_labels"][instance_name]["instance_analysis"].get("surface_defect", False)
+
         # create the instance_stacks
         inst_stack = semantic_to_instance(
             semantic_stack=semantic_stack,
@@ -1279,10 +1300,19 @@ def process(yml_file: Path) -> bool:
 
         print(f"\tcalculating '{instance_name}' instance properties...")
         # calculate indepedendent feature properties
-        inst_properties = instance_properties(
-            instance_stack=inst_stack,
-            inst_indices=inst_indices,
-        )
+        if surface_defect:
+            inst_properties = instance_properties_surface_defect(
+                semantic_stack=semantic_stack,
+                air_value=db["class_labels"][instance_name]["instance analysis"]["air value"],
+                defect_value=db["class_labels"][instance_name]["value"],
+                instance_stack=inst_stack,
+                inst_indices=inst_indices,
+            )
+        else:
+            inst_properties = instance_properties(
+                instance_stack=inst_stack,
+                inst_indices=inst_indices,
+            )
 
         # add to h5
         hio.add_to_h5(
